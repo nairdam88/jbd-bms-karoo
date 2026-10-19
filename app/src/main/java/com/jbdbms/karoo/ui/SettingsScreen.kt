@@ -155,9 +155,13 @@ fun SettingsScreen(onClose: () -> Unit) {
                 "Only turn on password login if your battery needs it; most do not.",
                 style = MaterialTheme.typography.bodySmall,
             )
-            ToggleRow("Try BLE bonding (Karoo workaround)", settings.tryBonding) { value ->
+            ToggleRow("Experimental: try BLE bonding", settings.tryBonding) { value ->
                 SettingsStore.update { it.copy(tryBonding = value) }
             }
+            Text(
+                "Leave off. On the Karoo, bonding can reset Bluetooth and turn it off.",
+                style = MaterialTheme.typography.bodySmall,
+            )
             ToggleRow("Keep connected when app is closed", settings.keepConnectedWhenClosed) { value ->
                 SettingsStore.update { it.copy(keepConnectedWhenClosed = value) }
             }

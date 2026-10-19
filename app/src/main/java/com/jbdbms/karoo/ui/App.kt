@@ -642,7 +642,9 @@ private fun startConnectionOrScan(context: Context) {
     BmsRepository.client().clearError()
     if (BmsRepository.connectionState.value != ConnectionState.DISCONNECTED) return
     val address = DeviceStore.lastAddress.value
-    if (address != null) {
+    // Without a live BluetoothDevice the stored address loses its BLE address
+    // type, so scan to rediscover the battery instead of guessing.
+    if (address != null && BmsRepository.client().hasLiveDevice()) {
         BmsRepository.client().connect(address)
         BmsForegroundService.start(context)
     } else {

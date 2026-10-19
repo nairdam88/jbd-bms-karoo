@@ -182,12 +182,12 @@ class JbdBmsClient(private val context: Context) {
 
     private val adapterStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(receiverContext: Context?, intent: Intent?) {
-            when (intent?.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1)) {
-                BluetoothAdapter.STATE_TURNING_OFF,
-                BluetoothAdapter.STATE_OFF,
-                -> onAdapterOff()
-
+            when (val state = intent?.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1)) {
+                BluetoothAdapter.STATE_TURNING_OFF -> onAdapterOff("turning off")
+                BluetoothAdapter.STATE_OFF -> onAdapterOff("off")
+                BluetoothAdapter.STATE_TURNING_ON -> log("Bluetooth turning on")
                 BluetoothAdapter.STATE_ON -> onAdapterOn()
+                else -> log("Bluetooth state=$state")
             }
         }
     }
@@ -229,8 +229,8 @@ class JbdBmsClient(private val context: Context) {
      * The adapter is going away; drop our handle without leaving a half-open
      * link behind, so the next launch starts from a clean stack.
      */
-    private fun onAdapterOff() {
-        log("Bluetooth turned off; releasing link")
+    private fun onAdapterOff(stateName: String) {
+        log("Bluetooth $stateName; releasing link")
         manualDisconnect = false
         reconnectJob?.cancel()
         reconnectJob = null
@@ -251,7 +251,10 @@ class JbdBmsClient(private val context: Context) {
 
     private fun onAdapterOn() {
         log("Bluetooth turned on")
-        if (_consumers.value > 0 && !manualDisconnect && gatt == null) startReconnect()
+        if (_consumers.value == 0 || manualDisconnect || gatt != null) return
+        // A cold start only has the stored address, which loses the BLE address
+        // type; scan instead so the battery is found as a real LE device.
+        if (hasLiveDevice()) startReconnect() else startScan()
     }
 
     // ----------------------------------------------------------------- debug log
@@ -452,6 +455,13 @@ class JbdBmsClient(private val context: Context) {
         if (gatt == null && stuck) {
             _connectionState.value = ConnectionState.DISCONNECTED
         }
+    }
+
+    /** True when we hold a real BluetoothDevice (from a scan or a past link). */
+    fun hasLiveDevice(): Boolean {
+        val address = lastAddress ?: return false
+        if (lastDevice != null) return true
+        return synchronized(scanDevices) { scanDevices.containsKey(address) }
     }
 
     /** Diagnostic snapshot of the last GATT target. */

@@ -26,7 +26,8 @@ object SettingsStore {
     private const val K_SCAN_TIMEOUT = "scan_timeout_ms"
     private const val K_LOW_POWER_CONNECTION = "low_power_connection"
     private const val K_AUTH_FALLBACK = "auth_fallback_enabled"
-    private const val K_TRY_BONDING = "try_bonding"
+    // v2 so the short-lived 0.2.6 default (true) is not carried over.
+    private const val K_TRY_BONDING = "try_bonding_v2"
     private const val K_KEEP_CONNECTED = "keep_connected_when_closed"
     private const val K_RAW_BUFFER = "raw_buffer_size"
 
