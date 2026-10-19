@@ -14,7 +14,9 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.jbdbms.karoo.MainActivity
 import com.jbdbms.karoo.R
+import com.jbdbms.karoo.ble.ConnectionState
 import com.jbdbms.karoo.data.BmsRepository
+import com.jbdbms.karoo.data.SettingsStore
 
 /**
  * Keeps the process (and therefore the BMS connection) alive while the app is
@@ -56,10 +58,14 @@ class BmsForegroundService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        // Swiping the app away should not leave a half-open BLE link behind.
         if (BmsRepository.isInitialized()) {
-            BmsRepository.releaseLink()
-            if (BmsRepository.consumers.value == 0) stopSelf()
+            val keepConnected = SettingsStore.settings.value.keepConnectedWhenClosed &&
+                BmsRepository.connectionState.value == ConnectionState.CONNECTED
+            if (!keepConnected) {
+                // Swiping the app away should not leave a half-open BLE link.
+                BmsRepository.releaseLink()
+                if (BmsRepository.consumers.value == 0) stopSelf()
+            }
         }
         super.onTaskRemoved(rootIntent)
     }

@@ -42,6 +42,10 @@ data class BmsSettings(
     val lowPowerConnection: Boolean = false,
     /** Send the speculative FF/AA password handshake when no data arrives. */
     val authFallbackEnabled: Boolean = false,
+    /** Ask Android to bond before connecting (Karoo BLE workaround). */
+    val tryBonding: Boolean = true,
+    /** Keep the link/service alive when the app is swiped away. */
+    val keepConnectedWhenClosed: Boolean = true,
     /** Maximum number of raw protocol frames retained for the in-app console. */
     val rawBufferSize: Int = 200,
 ) {

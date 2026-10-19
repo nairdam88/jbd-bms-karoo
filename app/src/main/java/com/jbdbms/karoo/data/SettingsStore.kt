@@ -26,6 +26,8 @@ object SettingsStore {
     private const val K_SCAN_TIMEOUT = "scan_timeout_ms"
     private const val K_LOW_POWER_CONNECTION = "low_power_connection"
     private const val K_AUTH_FALLBACK = "auth_fallback_enabled"
+    private const val K_TRY_BONDING = "try_bonding"
+    private const val K_KEEP_CONNECTED = "keep_connected_when_closed"
     private const val K_RAW_BUFFER = "raw_buffer_size"
 
     private var prefs: SharedPreferences? = null
@@ -63,6 +65,8 @@ object SettingsStore {
             scanTimeoutMs = p.getLong(K_SCAN_TIMEOUT, d.scanTimeoutMs),
             lowPowerConnection = p.getBoolean(K_LOW_POWER_CONNECTION, d.lowPowerConnection),
             authFallbackEnabled = p.getBoolean(K_AUTH_FALLBACK, d.authFallbackEnabled),
+            tryBonding = p.getBoolean(K_TRY_BONDING, d.tryBonding),
+            keepConnectedWhenClosed = p.getBoolean(K_KEEP_CONNECTED, d.keepConnectedWhenClosed),
             rawBufferSize = BmsSettings.clampRawBuffer(p.getInt(K_RAW_BUFFER, d.rawBufferSize)),
         )
     }
@@ -81,6 +85,8 @@ object SettingsStore {
             ?.putLong(K_SCAN_TIMEOUT, s.scanTimeoutMs)
             ?.putBoolean(K_LOW_POWER_CONNECTION, s.lowPowerConnection)
             ?.putBoolean(K_AUTH_FALLBACK, s.authFallbackEnabled)
+            ?.putBoolean(K_TRY_BONDING, s.tryBonding)
+            ?.putBoolean(K_KEEP_CONNECTED, s.keepConnectedWhenClosed)
             ?.putInt(K_RAW_BUFFER, s.rawBufferSize)
             ?.apply()
     }

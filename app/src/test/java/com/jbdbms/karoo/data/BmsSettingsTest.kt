@@ -19,6 +19,8 @@ class BmsSettingsTest {
         assertTrue(s.lowPowerScan)
         assertFalse(s.lowPowerConnection)
         assertFalse(s.authFallbackEnabled)
+        assertTrue(s.tryBonding)
+        assertTrue(s.keepConnectedWhenClosed)
         assertEquals(200, s.rawBufferSize)
     }
 

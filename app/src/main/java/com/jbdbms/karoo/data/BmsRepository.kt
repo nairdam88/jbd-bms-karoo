@@ -41,6 +41,7 @@ object BmsRepository {
     val settings: StateFlow<BmsSettings> get() = SettingsStore.settings
 
     fun clearConnectionLog() = client().clearConnectionLog()
+    fun resetLink() = client().resetLink()
     fun setRawEnabled(enabled: Boolean) = client().setRawEnabled(enabled)
     fun setUiVisible(visible: Boolean) = client().setUiVisible(visible)
     fun clearError() = client().clearError()

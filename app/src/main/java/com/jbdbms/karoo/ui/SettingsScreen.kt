@@ -61,10 +61,16 @@ fun SettingsScreen(onClose: () -> Unit) {
     var advancedExpanded by rememberSaveable { mutableStateOf(false) }
     var showLog by rememberSaveable { mutableStateOf(false) }
     var showConnectionLog by rememberSaveable { mutableStateOf(false) }
+    var showDebug by rememberSaveable { mutableStateOf(false) }
     var versionTaps by remember { mutableIntStateOf(0) }
     var developerMode by rememberSaveable { mutableStateOf(false) }
 
     val preset = BmsPreset.of(settings)
+
+    if (showDebug) {
+        DebugExportScreen(onClose = { showDebug = false })
+        return
+    }
 
     LaunchedEffect(showLog) { BmsRepository.setRawEnabled(showLog) }
     DisposableEffect(Unit) {
@@ -149,6 +155,16 @@ fun SettingsScreen(onClose: () -> Unit) {
                 "Only turn on password login if your battery needs it; most do not.",
                 style = MaterialTheme.typography.bodySmall,
             )
+            ToggleRow("Try BLE bonding (Karoo workaround)", settings.tryBonding) { value ->
+                SettingsStore.update { it.copy(tryBonding = value) }
+            }
+            ToggleRow("Keep connected when app is closed", settings.keepConnectedWhenClosed) { value ->
+                SettingsStore.update { it.copy(keepConnectedWhenClosed = value) }
+            }
+
+            OutlinedButton(onClick = { showDebug = true }) {
+                Text("Debug tools & export log")
+            }
 
             TextButton(onClick = { showConnectionLog = !showConnectionLog }) {
                 Text(if (showConnectionLog) "Hide connection log" else "Show connection log")

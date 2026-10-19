@@ -71,6 +71,21 @@ enum class ConnectionState {
     CONNECT_FAILED,
 }
 
+/** Diagnostic snapshot of the current/last GATT target. */
+data class LinkInfo(
+    val requestedAddress: String?,
+    val connectedAddress: String?,
+    val deviceType: Int?,
+    val bondState: Int?,
+)
+
+private data class LinkStrategy(
+    val name: String,
+    val autoConnect: Boolean,
+    val transportLe: Boolean,
+    val discoveryDelayMs: Long,
+)
+
 /**
  * Single-connection BLE central for JBD / XiaoXiang / Overkill Solar BMS modules.
  *
@@ -119,6 +134,7 @@ class JbdBmsClient(private val context: Context) {
     private val connectSeq = AtomicInteger(0)
     private val scanDevices = mutableMapOf<String, BluetoothDevice>()
     private var lastDevice: BluetoothDevice? = null
+    private var requestedAddress: String? = null
     private var lastAddress: String? = DeviceStore.lastAddress.value
     private var manualDisconnect = false
     private var uiVisible = false
@@ -128,6 +144,9 @@ class JbdBmsClient(private val context: Context) {
     @Volatile
     private var scanning = false
     private var linkDroppedEarly = false
+
+    @Volatile
+    private var discoveryDelayMs = 300L
 
     private val parser = JbdFrameParser()
     private val auth = JbdAuth { bytes, note -> sendRaw(bytes, note) }
@@ -173,6 +192,15 @@ class JbdBmsClient(private val context: Context) {
         }
     }
 
+    private val bondStateReceiver = object : BroadcastReceiver() {
+        @Suppress("DEPRECATION")
+        override fun onReceive(receiverContext: Context?, intent: Intent?) {
+            val device = intent?.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
+            val state = intent?.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, -1) ?: return
+            log("Bond ${device?.address ?: "?"} -> ${bondLabel(state)}")
+        }
+    }
+
     init {
         scope.launch { _consumers.collect { onConsumersChanged() } }
         scope.launch { SettingsStore.settings.collect { onSettingsChanged() } }
@@ -182,6 +210,19 @@ class JbdBmsClient(private val context: Context) {
             IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED),
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
+        ContextCompat.registerReceiver(
+            context,
+            bondStateReceiver,
+            IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED),
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+    }
+
+    private fun bondLabel(state: Int): String = when (state) {
+        BluetoothDevice.BOND_NONE -> "none"
+        BluetoothDevice.BOND_BONDING -> "bonding"
+        BluetoothDevice.BOND_BONDED -> "bonded"
+        else -> "state $state"
     }
 
     /**
@@ -373,6 +414,7 @@ class JbdBmsClient(private val context: Context) {
     /** User-initiated connect. Remembers the address for later auto-reconnect. */
     fun connect(address: String) {
         val connectId = connectSeq.incrementAndGet()
+        requestedAddress = address
         lastAddress = address
         manualDisconnect = false
         reconnectJob?.cancel()
@@ -410,6 +452,28 @@ class JbdBmsClient(private val context: Context) {
         if (gatt == null && stuck) {
             _connectionState.value = ConnectionState.DISCONNECTED
         }
+    }
+
+    /** Diagnostic snapshot of the last GATT target. */
+    fun linkInfo(): LinkInfo = LinkInfo(
+        requestedAddress = requestedAddress,
+        connectedAddress = lastDevice?.address ?: lastAddress,
+        deviceType = lastDevice?.type,
+        bondState = lastDevice?.bondState,
+    )
+
+    /** Forget the current target and the cached device handles (debug recovery). */
+    fun resetLink() {
+        log("Resetting link and cached device")
+        disconnect()
+        manualDisconnect = false
+        requestedAddress = null
+        lastDevice = null
+        lastAddress = null
+        synchronized(scanDevices) { scanDevices.clear() }
+        _scanResults.value = emptyList()
+        DeviceStore.set(null)
+        _connectionState.value = ConnectionState.DISCONNECTED
     }
 
     /**
@@ -463,11 +527,27 @@ class JbdBmsClient(private val context: Context) {
                     "bond=${device.bondState} via=$source",
             )
 
-            val maxAttempts = if (autoConnect) 2 else 3
+            if (SettingsStore.settings.value.tryBonding &&
+                device.bondState == BluetoothDevice.BOND_NONE
+            ) {
+                try {
+                    val requested = device.createBond()
+                    log("[#$connectId] Bonding requested -> $requested")
+                } catch (_: SecurityException) {
+                }
+            }
+
+            val maxAttempts = 3
             var attempt = 0
             while (attempt < maxAttempts) {
                 attempt++
+                val strategy = when (attempt) {
+                    1 -> LinkStrategy("A", autoConnect, transportLe = true, discoveryDelayMs = 300)
+                    2 -> LinkStrategy("B", autoConnect = true, transportLe = true, discoveryDelayMs = 800)
+                    else -> LinkStrategy("C", autoConnect = false, transportLe = false, discoveryDelayMs = 800)
+                }
                 linkDroppedEarly = false
+                discoveryDelayMs = strategy.discoveryDelayMs
                 val deferred = CompletableDeferred<Boolean>()
                 connectResult = deferred
                 closeGatt(refreshCache = true)
@@ -477,13 +557,28 @@ class JbdBmsClient(private val context: Context) {
                 _connectionState.value = ConnectionState.CONNECTING
                 log(
                     "[#$connectId] Connecting to ${device.address} " +
-                        "(autoConnect=$autoConnect, attempt $attempt/$maxAttempts)",
+                        "(strategy=${strategy.name}, autoConnect=${strategy.autoConnect}, " +
+                        "le=${strategy.transportLe}, attempt $attempt/$maxAttempts)",
                 )
 
+                val timeoutMs = if (strategy.autoConnect) {
+                    8_000L
+                } else {
+                    SettingsStore.settings.value.connectTimeoutMs
+                }
                 var success = false
                 try {
                     val newGatt = try {
-                        device.connectGatt(context, autoConnect, gattCallback, BluetoothDevice.TRANSPORT_LE)
+                        if (strategy.transportLe) {
+                            device.connectGatt(
+                                context,
+                                strategy.autoConnect,
+                                gattCallback,
+                                BluetoothDevice.TRANSPORT_LE,
+                            )
+                        } else {
+                            device.connectGatt(context, strategy.autoConnect, gattCallback)
+                        }
                     } catch (_: SecurityException) {
                         null
                     }
@@ -492,19 +587,16 @@ class JbdBmsClient(private val context: Context) {
                         linkDroppedEarly = true
                     } else {
                         gatt = newGatt
-                        success = withTimeout(SettingsStore.settings.value.connectTimeoutMs) {
-                            deferred.await()
-                        }
+                        success = withTimeout(timeoutMs) { deferred.await() }
                         if (!success) {
                             log("[#$connectId] Connect attempt failed before services were ready")
                         }
                     }
                 } catch (_: TimeoutCancellationException) {
-                    log(
-                        "[#$connectId] Connect timed out after " +
-                            "${SettingsStore.settings.value.connectTimeoutMs} ms",
-                    )
-                    return false
+                    log("[#$connectId] Connect timed out after $timeoutMs ms")
+                    closeGatt(refreshCache = true)
+                    if (attempt >= maxAttempts) return false
+                    continue
                 } catch (e: CancellationException) {
                     log("[#$connectId] Connect cancelled; releasing link")
                     throw e
@@ -621,14 +713,17 @@ class JbdBmsClient(private val context: Context) {
                     scope.launch {
                         // Let the link settle; some BMS modules drop the first
                         // connection if discovery starts immediately.
-                        delay(300)
+                        delay(discoveryDelayMs)
                         if (g !== gatt) return@launch
                         val started = try {
                             g.discoverServices()
                         } catch (_: SecurityException) {
                             false
                         }
-                        log("discoverServices -> $started (${g.device.address})")
+                        log(
+                            "discoverServices -> $started (${g.device.address}) " +
+                                "after ${discoveryDelayMs} ms",
+                        )
                     }
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> onLinkLost(g, "link disconnected")
