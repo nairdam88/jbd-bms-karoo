@@ -56,6 +56,7 @@ import com.jbdbms.karoo.data.DeviceStore
 import com.jbdbms.karoo.data.ScanResult
 import com.jbdbms.karoo.protocol.BmsData
 import com.jbdbms.karoo.service.BmsForegroundService
+import kotlinx.coroutines.delay
 
 @Composable
 fun App() {
@@ -93,6 +94,21 @@ fun App() {
         if (state == BleReadiness.PERMISSION_MISSING && !askedAutomatically) {
             askedAutomatically = true
             permissionLauncher.launch(BleReadinessChecker.requiredPermissions())
+        }
+    }
+
+    // Bluetooth can still be turning on when the app launches; re-check briefly
+    // instead of showing "Bluetooth is off" until the next resume.
+    LaunchedEffect(readiness) {
+        if (readiness != BleReadiness.BLUETOOTH_OFF) return@LaunchedEffect
+        repeat(3) {
+            delay(700)
+            val state = BleReadinessChecker.check(context)
+            if (state != BleReadiness.BLUETOOTH_OFF) {
+                readiness = state
+                if (state == BleReadiness.READY) startConnectionOrScan(context)
+                return@LaunchedEffect
+            }
         }
     }
 

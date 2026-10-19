@@ -120,6 +120,7 @@ class JbdBmsClient(private val context: Context) {
 
     @Volatile
     private var scanning = false
+    private var linkDroppedEarly = false
 
     private val parser = JbdFrameParser()
     private val auth = JbdAuth { bytes, note -> sendRaw(bytes, note) }
@@ -259,7 +260,10 @@ class JbdBmsClient(private val context: Context) {
             // A scan is already running; don't let a second start kill it.
             return
         }
-        // A pending auto-reconnect would call stopScan() and swallow this scan.
+        // Pending connect/reconnect work calls stopScan() and would swallow this
+        // scan, so a user-requested scan wins.
+        connectJob?.cancel()
+        connectJob = null
         reconnectJob?.cancel()
         reconnectJob = null
         _scanResults.value = emptyList()
@@ -366,42 +370,60 @@ class JbdBmsClient(private val context: Context) {
                 null
             } ?: return false
 
-            val deferred = CompletableDeferred<Boolean>()
-            connectResult = deferred
-            closeGatt()
-            parser.reset()
-            authTried.set(false)
-            gotResponse.set(false)
-            _connectionState.value = ConnectionState.CONNECTING
-            log("Connecting to $address (autoConnect=$autoConnect)")
+            val maxAttempts = if (autoConnect) 2 else 3
+            var attempt = 0
+            while (attempt < maxAttempts) {
+                attempt++
+                linkDroppedEarly = false
+                val deferred = CompletableDeferred<Boolean>()
+                connectResult = deferred
+                closeGatt(refreshCache = true)
+                parser.reset()
+                authTried.set(false)
+                gotResponse.set(false)
+                _connectionState.value = ConnectionState.CONNECTING
+                log(
+                    "Connecting to $address " +
+                        "(autoConnect=$autoConnect, attempt $attempt/$maxAttempts)",
+                )
 
-            var success = false
-            try {
-                val newGatt = try {
-                    device.connectGatt(context, autoConnect, gattCallback, BluetoothDevice.TRANSPORT_LE)
-                } catch (_: SecurityException) {
-                    null
-                }
-                if (newGatt == null) {
-                    log("connectGatt returned no handle")
-                } else {
-                    gatt = newGatt
-                    success = withTimeout(SettingsStore.settings.value.connectTimeoutMs) {
-                        deferred.await()
+                var success = false
+                try {
+                    val newGatt = try {
+                        device.connectGatt(context, autoConnect, gattCallback, BluetoothDevice.TRANSPORT_LE)
+                    } catch (_: SecurityException) {
+                        null
                     }
-                    if (!success) log("Connect attempt failed before services were ready")
+                    if (newGatt == null) {
+                        log("connectGatt returned no handle")
+                        linkDroppedEarly = true
+                    } else {
+                        gatt = newGatt
+                        success = withTimeout(SettingsStore.settings.value.connectTimeoutMs) {
+                            deferred.await()
+                        }
+                        if (!success) log("Connect attempt failed before services were ready")
+                    }
+                } catch (_: TimeoutCancellationException) {
+                    log("Connect timed out after ${SettingsStore.settings.value.connectTimeoutMs} ms")
+                    return false
+                } catch (e: CancellationException) {
+                    log("Connect cancelled; releasing link")
+                    throw e
+                } finally {
+                    if (connectResult === deferred) connectResult = null
+                    if (!success) closeGatt(refreshCache = true)
                 }
-                success
-            } catch (_: TimeoutCancellationException) {
-                log("Connect timed out after ${SettingsStore.settings.value.connectTimeoutMs} ms")
-                false
-            } catch (e: CancellationException) {
-                log("Connect cancelled; releasing link")
-                throw e
-            } finally {
-                if (connectResult === deferred) connectResult = null
-                if (!success) closeGatt()
+
+                if (success) return true
+                if (!linkDroppedEarly) return false
+                if (attempt < maxAttempts) {
+                    val retryDelay = 400L * attempt
+                    log("Link dropped during setup; retrying in ${retryDelay} ms")
+                    delay(retryDelay)
+                }
             }
+            false
         }
 
     /** User-initiated disconnect. Suppresses auto-reconnect until the next [connect]. */
@@ -428,15 +450,30 @@ class JbdBmsClient(private val context: Context) {
     }
 
     @SuppressLint("MissingPermission")
-    private fun closeGatt() {
+    private fun closeGatt(refreshCache: Boolean = false) {
         val old = gatt
         // Null the fields first so late callbacks from the old link are ignored.
         gatt = null
         notifyChar = null
         writeChar = null
+        if (old != null && refreshCache) refreshGattCache(old)
         try {
             old?.close()
         } catch (_: SecurityException) {
+        }
+    }
+
+    /**
+     * Best-effort clear of Android's cached GATT table. A stale cache commonly
+     * makes the stack disconnect right after service discovery on the next
+     * connection attempt.
+     */
+    private fun refreshGattCache(old: BluetoothGatt) {
+        try {
+            val refreshed = old.javaClass.getMethod("refresh").invoke(old) as? Boolean
+            log("GATT cache refresh -> $refreshed")
+        } catch (_: Throwable) {
+            // Hidden API unavailable on this build; harmless.
         }
     }
 
@@ -453,9 +490,20 @@ class JbdBmsClient(private val context: Context) {
             }
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
-                    log("Link up; discovering services")
+                    log("Link up; waiting briefly before service discovery")
                     _connectionState.value = ConnectionState.CONNECTING
-                    g.discoverServices()
+                    scope.launch {
+                        // Let the link settle; some BMS modules drop the first
+                        // connection if discovery starts immediately.
+                        delay(300)
+                        if (g !== gatt) return@launch
+                        val started = try {
+                            g.discoverServices()
+                        } catch (_: SecurityException) {
+                            false
+                        }
+                        log("discoverServices -> $started (${g.device.address})")
+                    }
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> onLinkLost(g, "link disconnected")
             }
@@ -496,6 +544,10 @@ class JbdBmsClient(private val context: Context) {
                 writeDescriptor(desc, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
             }
             _connectionState.value = ConnectionState.CONNECTED
+            val requested = lastAddress
+            if (requested != null && !requested.equals(g.device.address, ignoreCase = true)) {
+                log("Note: connected address ${g.device.address} differs from $requested")
+            }
             lastAddress = g.device.address
             DeviceStore.set(g.device.address)
             log("Connected to ${g.device.address}; notifications subscribed")
@@ -551,13 +603,15 @@ class JbdBmsClient(private val context: Context) {
     /** Called whenever the current GATT link drops, for any reason. */
     private fun onLinkLost(g: BluetoothGatt, reason: String) {
         if (g !== gatt) return
-        log("Link lost: $reason")
+        val wasReady = _connectionState.value == ConnectionState.CONNECTED
+        linkDroppedEarly = !wasReady
+        log("Link lost: $reason (ready=$wasReady)")
         stopPolling()
         graceJob?.cancel()
         graceJob = null
         idleDisconnectJob?.cancel()
         idleDisconnectJob = null
-        closeGatt()
+        closeGatt(refreshCache = true)
         _data.value = BmsData()
         _connectionState.value = ConnectionState.DISCONNECTED
         connectResult?.complete(false)
