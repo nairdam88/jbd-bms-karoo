@@ -42,6 +42,7 @@ object BmsRepository {
 
     fun clearConnectionLog() = client().clearConnectionLog()
     fun resetLink() = client().resetLink()
+    fun requestBluetooth() = client().requestBluetooth()
     fun setRawEnabled(enabled: Boolean) = client().setRawEnabled(enabled)
     fun setUiVisible(visible: Boolean) = client().setUiVisible(visible)
     fun clearError() = client().clearError()

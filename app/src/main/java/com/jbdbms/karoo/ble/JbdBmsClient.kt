@@ -86,6 +86,8 @@ private data class LinkStrategy(
     val discoveryDelayMs: Long,
 )
 
+private enum class PendingAction { NONE, SCAN, CONNECT }
+
 /**
  * Single-connection BLE central for JBD / XiaoXiang / Overkill Solar BMS modules.
  *
@@ -153,6 +155,10 @@ class JbdBmsClient(private val context: Context) {
     private val authTried = AtomicBoolean(false)
     private val gotResponse = AtomicBoolean(false)
 
+    private val karooBluetooth = KarooBluetooth(context) { message -> log(message) }
+    private var pendingAction = PendingAction.NONE
+    private var pendingJob: Job? = null
+
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
@@ -216,6 +222,7 @@ class JbdBmsClient(private val context: Context) {
             IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED),
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
+        karooBluetooth.start()
     }
 
     private fun bondLabel(state: Int): String = when (state) {
@@ -252,9 +259,40 @@ class JbdBmsClient(private val context: Context) {
     private fun onAdapterOn() {
         log("Bluetooth turned on")
         if (_consumers.value == 0 || manualDisconnect || gatt != null) return
-        // A cold start only has the stored address, which loses the BLE address
-        // type; scan instead so the battery is found as a real LE device.
-        if (hasLiveDevice()) startReconnect() else startScan()
+        karooBluetooth.request()
+        when (pendingAction) {
+            PendingAction.SCAN -> {
+                pendingAction = PendingAction.NONE
+                startScan()
+            }
+            PendingAction.CONNECT -> {
+                pendingAction = PendingAction.NONE
+                val address = lastAddress
+                if (address != null) connect(address) else startScan()
+            }
+            PendingAction.NONE ->
+                // A cold start only has the stored address, which loses the BLE
+                // address type; scan so the battery is found as a real LE device.
+                if (hasLiveDevice()) startReconnect() else startScan()
+        }
+    }
+
+    /** Wait for Karoo OS to turn the radio on after a [RequestBluetooth]. */
+    private fun armPending(action: PendingAction, timeoutMs: Long = 6_000L) {
+        pendingAction = action
+        pendingJob?.cancel()
+        pendingJob = scope.launch {
+            delay(timeoutMs)
+            if (pendingAction == action && !isBluetoothOn()) {
+                log("Karoo did not enable Bluetooth within ${timeoutMs} ms")
+                pendingAction = PendingAction.NONE
+                _connectionState.value = if (action == PendingAction.SCAN) {
+                    ConnectionState.ERROR
+                } else {
+                    ConnectionState.CONNECT_FAILED
+                }
+            }
+        }
     }
 
     // ----------------------------------------------------------------- debug log
@@ -349,13 +387,24 @@ class JbdBmsClient(private val context: Context) {
 
     @SuppressLint("MissingPermission")
     fun startScan() {
-        if (!hasRequiredPermissions() || !isBluetoothOn()) {
-            // The UI shows a dedicated "allow access / turn on Bluetooth" card.
+        if (!hasRequiredPermissions()) {
+            // The UI shows a dedicated "allow access" card.
             if (_connectionState.value != ConnectionState.CONNECTED) {
                 _connectionState.value = ConnectionState.DISCONNECTED
             }
             return
         }
+        manualDisconnect = false
+        karooBluetooth.request()
+        if (!isBluetoothOn()) {
+            log("Scan waiting for Karoo to enable Bluetooth")
+            _connectionState.value = ConnectionState.SCANNING
+            armPending(PendingAction.SCAN)
+            return
+        }
+        pendingJob?.cancel()
+        pendingJob = null
+        pendingAction = PendingAction.NONE
         val scanner = adapter?.bluetoothLeScanner
         if (scanner == null) {
             log("Scan unavailable: no scanner")
@@ -423,6 +472,21 @@ class JbdBmsClient(private val context: Context) {
         reconnectJob?.cancel()
         reconnectJob = null
         connectJob?.cancel()
+        karooBluetooth.request()
+        if (!hasRequiredPermissions()) {
+            log("[#$connectId] Connect skipped: missing permission")
+            _connectionState.value = ConnectionState.DISCONNECTED
+            return
+        }
+        if (!isBluetoothOn()) {
+            log("[#$connectId] Waiting for Karoo to enable Bluetooth")
+            _connectionState.value = ConnectionState.CONNECTING
+            armPending(PendingAction.CONNECT)
+            return
+        }
+        pendingJob?.cancel()
+        pendingJob = null
+        pendingAction = PendingAction.NONE
         connectJob = scope.launch {
             log("[#$connectId] User asked to connect to $address")
             if (!attemptConnect(address, autoConnect = false, connectId)) {
@@ -630,6 +694,10 @@ class JbdBmsClient(private val context: Context) {
     fun disconnect() {
         log("User disconnected")
         manualDisconnect = true
+        pendingJob?.cancel()
+        pendingJob = null
+        pendingAction = PendingAction.NONE
+        karooBluetooth.release()
         reconnectJob?.cancel()
         reconnectJob = null
         connectJob?.cancel()
@@ -657,6 +725,7 @@ class JbdBmsClient(private val context: Context) {
     fun releaseLink() {
         if (_consumers.value > 0) return
         log("Releasing idle link")
+        karooBluetooth.release()
         reconnectJob?.cancel()
         reconnectJob = null
         connectJob?.cancel()
@@ -926,6 +995,7 @@ class JbdBmsClient(private val context: Context) {
                 closeGatt()
                 _data.value = BmsData()
                 _connectionState.value = ConnectionState.DISCONNECTED
+                karooBluetooth.release()
                 if (!uiVisible) BmsForegroundService.stop(context)
             }
         }
@@ -1141,11 +1211,21 @@ class JbdBmsClient(private val context: Context) {
         _rawFrames.value = emptyList()
     }
 
+    /** Ask Karoo OS to hold the Bluetooth radio on for us. */
+    fun requestBluetooth() {
+        karooBluetooth.request()
+    }
+
     fun shutdown() {
         try {
             context.unregisterReceiver(adapterStateReceiver)
         } catch (_: IllegalArgumentException) {
         }
+        try {
+            context.unregisterReceiver(bondStateReceiver)
+        } catch (_: IllegalArgumentException) {
+        }
+        karooBluetooth.stop()
         disconnect()
         scope.cancel()
     }

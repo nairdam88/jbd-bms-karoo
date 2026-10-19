@@ -38,6 +38,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -57,10 +58,12 @@ import com.jbdbms.karoo.data.ScanResult
 import com.jbdbms.karoo.protocol.BmsData
 import com.jbdbms.karoo.service.BmsForegroundService
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @Composable
 fun App() {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var readiness by remember { mutableStateOf(BleReadinessChecker.check(context)) }
     var showSettings by remember { mutableStateOf(false) }
 
@@ -95,6 +98,8 @@ fun App() {
             askedAutomatically = true
             permissionLauncher.launch(BleReadinessChecker.requiredPermissions())
         }
+        // On Karoo the radio is normally off; ask the host to hold it for us.
+        if (state == BleReadiness.BLUETOOTH_OFF) BmsRepository.requestBluetooth()
     }
 
     // Bluetooth can still be turning on when the app launches; re-check briefly
@@ -120,6 +125,7 @@ fun App() {
             if (previousReadiness != BleReadiness.READY) startConnectionOrScan(context)
         }
         previousReadiness = state
+        if (state == BleReadiness.BLUETOOTH_OFF) BmsRepository.requestBluetooth()
     }
 
     if (showSettings) {
@@ -148,10 +154,17 @@ fun App() {
         onOpenAppSettings = { openAppSettings(context) },
         onOpenPrivacySettings = { openPrivacySettings(context) },
         onEnableBluetooth = {
-            try {
-                bluetoothLauncher.launch(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
-            } catch (_: ActivityNotFoundException) {
-                openBluetoothSettings(context)
+            // Ask Karoo OS first; the system dialog is only a fallback.
+            BmsRepository.requestBluetooth()
+            scope.launch {
+                delay(1_500)
+                if (BleReadinessChecker.check(context) == BleReadiness.BLUETOOTH_OFF) {
+                    try {
+                        bluetoothLauncher.launch(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
+                    } catch (_: ActivityNotFoundException) {
+                        openBluetoothSettings(context)
+                    }
+                }
             }
         },
         onOpenBluetoothSettings = { openBluetoothSettings(context) },
