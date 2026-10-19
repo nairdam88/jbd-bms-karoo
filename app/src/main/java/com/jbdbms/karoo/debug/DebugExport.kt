@@ -3,6 +3,7 @@ package com.jbdbms.karoo.debug
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.os.Build
 import com.jbdbms.karoo.BuildConfig
@@ -27,6 +28,8 @@ internal data class DebugReport(
     val adapter: String,
     val settings: String,
     val link: String,
+    val hold: String,
+    val gattLinks: String,
     val scans: List<String>,
     val log: List<String>,
     val raw: List<String>,
@@ -46,6 +49,7 @@ object DebugExport {
         val initialized = BmsRepository.isInitialized()
         val client = if (initialized) BmsRepository.client() else null
         val link = client?.linkInfo()
+        val hold = client?.holdInfo()
         val scans = if (initialized) BmsRepository.scanResults.value else emptyList()
         val log = if (initialized) BmsRepository.connectionLog.value else emptyList()
         val raw = if (initialized) BmsRepository.rawFrames.value else emptyList()
@@ -71,6 +75,17 @@ object DebugExport {
                 "bond=${bondLabel(link.bondState)}"
         }
 
+        val holdText = if (hold == null) {
+            "not initialized"
+        } else {
+            "wanted=${hold.wanted} held=${hold.held} " +
+                "consumers=${hold.consumers} uiVisible=${hold.uiVisible} " +
+                "scanning=${hold.scanning} pending=${hold.pending} " +
+                "autoSuppressed=${hold.autoSuppressed} " +
+                "autoAddress=${hold.autoAddress ?: "-"} " +
+                "known=${hold.knownAddress ?: "-"}"
+        }
+
         return format(
             DebugReport(
                 generatedAt = timeFormat.format(Date()),
@@ -84,6 +99,8 @@ object DebugExport {
                 adapter = adapterState(context),
                 settings = settingsText,
                 link = linkText,
+                hold = holdText,
+                gattLinks = gattLinks(context),
                 scans = scans.map { "${it.name ?: "?"} ${it.address} rssi=${it.rssi}" },
                 log = log.map { "${logTimeFormat.format(Date(it.timestampMs))} ${it.message}" },
                 raw = raw.takeLast(100).map { frame ->
@@ -109,6 +126,10 @@ object DebugExport {
         appendLine("--- GATT target ---")
         appendLine(report.link)
         appendLine()
+        appendLine("--- Bluetooth hold ---")
+        appendLine(report.hold)
+        appendLine("System GATT links: ${report.gattLinks}")
+        appendLine()
         appendLine("--- Scan results (${report.scans.size}) ---")
         report.scans.forEach { appendLine(it) }
         appendLine()
@@ -118,6 +139,24 @@ object DebugExport {
             appendLine()
             appendLine("--- Raw frames (last ${report.raw.size}) ---")
             report.raw.forEach { appendLine(it) }
+        }
+    }
+
+    /** Other BLE links the system reports, useful for coexistence checks. */
+    private fun gattLinks(context: Context): String {
+        val manager = try {
+            context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+        } catch (_: SecurityException) {
+            null
+        } ?: return "unavailable"
+        return try {
+            manager.getConnectedDevices(BluetoothProfile.GATT)
+                .joinToString(", ") { it.address }
+                .ifEmpty { "none" }
+        } catch (_: SecurityException) {
+            "permission"
+        } catch (_: Exception) {
+            "unavailable"
         }
     }
 

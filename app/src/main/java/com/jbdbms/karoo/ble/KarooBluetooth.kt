@@ -27,6 +27,9 @@ class KarooBluetooth(
     private var wanted = false
     private var held = false
 
+    val isWanted: Boolean get() = wanted
+    val isHeld: Boolean get() = held
+
     fun start() {
         if (started) return
         started = true

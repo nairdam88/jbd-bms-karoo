@@ -17,6 +17,9 @@ class DebugExportTest {
         adapter = "ON enabled=true le=true",
         settings = "autoReconnect=true",
         link = "requested=AA:BB connected=AA:CC type=2 bond=none",
+        hold = "wanted=true held=true consumers=1 uiVisible=false scanning=false " +
+            "pending=NONE autoSuppressed=false autoAddress=- known=AA:BB",
+        gattLinks = "AA:BB",
         scans = listOf("BMS AA:BB rssi=-70"),
         log = listOf("22:00:01.000 [#1] Connecting"),
         raw = listOf("TX DD A5 03 00 FF FD 77"),
@@ -31,6 +34,9 @@ class DebugExportTest {
         assertTrue(text.contains("Device: Hammerhead Karoo"))
         assertTrue(text.contains("--- GATT target ---"))
         assertTrue(text.contains("requested=AA:BB"))
+        assertTrue(text.contains("--- Bluetooth hold ---"))
+        assertTrue(text.contains("wanted=true held=true"))
+        assertTrue(text.contains("System GATT links: AA:BB"))
         assertTrue(text.contains("--- Scan results (1) ---"))
         assertTrue(text.contains("--- Connection log (1) ---"))
         assertTrue(text.contains("[#1] Connecting"))

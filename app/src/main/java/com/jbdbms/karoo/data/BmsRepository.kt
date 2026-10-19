@@ -3,6 +3,7 @@ package com.jbdbms.karoo.data
 import android.content.Context
 import com.jbdbms.karoo.ble.ConnectionLogEntry
 import com.jbdbms.karoo.ble.ConnectionState
+import com.jbdbms.karoo.ble.HoldInfo
 import com.jbdbms.karoo.ble.JbdBmsClient
 import com.jbdbms.karoo.protocol.BmsData
 import kotlinx.coroutines.flow.StateFlow
@@ -43,6 +44,7 @@ object BmsRepository {
     fun clearConnectionLog() = client().clearConnectionLog()
     fun resetLink() = client().resetLink()
     fun requestBluetooth() = client().requestBluetooth()
+    fun holdInfo(): HoldInfo = client().holdInfo()
     fun setRawEnabled(enabled: Boolean) = client().setRawEnabled(enabled)
     fun setUiVisible(visible: Boolean) = client().setUiVisible(visible)
     fun clearError() = client().clearError()
