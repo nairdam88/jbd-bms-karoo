@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">JBD BMS</string>
+    <string name="notif_channel_desc">Keeps your battery connection active in the background</string>
+    <string name="notif_title">Battery connection active</string>
+    <string name="notif_text">Keeping your JBD BMS connected for ride data.</string>
+
+    <!-- Karoo extension -->
+    <string name="extension_name">JBD BMS</string>
+    <string name="dt_soc">Battery SOC</string>
+    <string name="dt_soc_desc">State of charge reported by the JBD BMS</string>
+    <string name="dt_voltage">Battery voltage</string>
+    <string name="dt_voltage_desc">Pack voltage reported by the JBD BMS</string>
+    <string name="dt_current">Battery current</string>
+    <string name="dt_current_desc">Signed pack current reported by the JBD BMS</string>
+    <string name="dt_power">Battery power</string>
+    <string name="dt_power_desc">Pack power reported by the JBD BMS</string>
+</resources>

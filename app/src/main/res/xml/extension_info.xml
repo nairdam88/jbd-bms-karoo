@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ExtensionInfo
+    displayName="@string/extension_name"
+    icon="@drawable/ic_battery"
+    id="jbd-bms">
+    <DataType
+        description="@string/dt_soc_desc"
+        displayName="@string/dt_soc"
+        graphical="false"
+        icon="@drawable/ic_battery"
+        typeId="soc" />
+    <DataType
+        description="@string/dt_voltage_desc"
+        displayName="@string/dt_voltage"
+        graphical="false"
+        icon="@drawable/ic_battery"
+        typeId="voltage" />
+    <DataType
+        description="@string/dt_current_desc"
+        displayName="@string/dt_current"
+        graphical="false"
+        icon="@drawable/ic_battery"
+        typeId="current" />
+    <DataType
+        description="@string/dt_power_desc"
+        displayName="@string/dt_power"
+        graphical="false"
+        icon="@drawable/ic_battery"
+        typeId="power" />
+</ExtensionInfo>

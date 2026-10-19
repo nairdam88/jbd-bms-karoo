@@ -1,0 +1,10 @@
+{
+  "label": "JBD BMS",
+  "packageName": "com.jbdbms.karoo",
+  "latestApkUrl": "__APK_URL__",
+  "latestVersion": "__VERSION_NAME__",
+  "latestVersionCode": __VERSION_CODE__,
+  "developer": "nairdam88",
+  "description": "JBD / XiaoXiang / Overkill Solar BMS data fields for Hammerhead Karoo.",
+  "releaseNotes": "__RELEASE_NOTES__"
+}
