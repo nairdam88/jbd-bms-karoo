@@ -34,8 +34,14 @@ data class BmsSettings(
     val lowPowerScan: Boolean = true,
     /** Auto-stop duration for an active scan. */
     val scanTimeoutMs: Long = 12_000L,
-    /** Request a low-power BLE connection interval after connecting. */
-    val lowPowerConnection: Boolean = true,
+    /**
+     * Request a low-power BLE connection interval after connecting. Off by
+     * default because the slower interval can trip the link supervision
+     * timeout and drop the battery on a weak signal.
+     */
+    val lowPowerConnection: Boolean = false,
+    /** Send the speculative FF/AA password handshake when no data arrives. */
+    val authFallbackEnabled: Boolean = false,
     /** Maximum number of raw protocol frames retained for the in-app console. */
     val rawBufferSize: Int = 200,
 ) {

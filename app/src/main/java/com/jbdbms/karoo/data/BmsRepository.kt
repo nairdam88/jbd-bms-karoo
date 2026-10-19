@@ -1,6 +1,7 @@
 package com.jbdbms.karoo.data
 
 import android.content.Context
+import com.jbdbms.karoo.ble.ConnectionLogEntry
 import com.jbdbms.karoo.ble.ConnectionState
 import com.jbdbms.karoo.ble.JbdBmsClient
 import com.jbdbms.karoo.protocol.BmsData
@@ -29,9 +30,11 @@ object BmsRepository {
     val scanResults: StateFlow<List<ScanResult>> get() = client().scanResults
     val rawFrames: StateFlow<List<RawFrame>> get() = client().rawFrames
     val consumers: StateFlow<Int> get() = client().consumers
+    val connectionLog: StateFlow<List<ConnectionLogEntry>> get() = client().connectionLog
 
     val settings: StateFlow<BmsSettings> get() = SettingsStore.settings
 
+    fun clearConnectionLog() = client().clearConnectionLog()
     fun setRawEnabled(enabled: Boolean) = client().setRawEnabled(enabled)
     fun setUiVisible(visible: Boolean) = client().setUiVisible(visible)
     fun clearError() = client().clearError()

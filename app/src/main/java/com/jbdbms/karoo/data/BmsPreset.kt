@@ -23,7 +23,7 @@ enum class BmsPreset {
             pollIntervalVisibleMs = 1_000L,
             pollIntervalBackgroundMs = 2_000L,
             lowPowerScan = true,
-            lowPowerConnection = true,
+            lowPowerConnection = false,
         )
         FAST -> settings.copy(
             pollIntervalVisibleMs = 500L,
@@ -43,7 +43,7 @@ enum class BmsPreset {
             settings.pollIntervalVisibleMs == 1_000L &&
                 settings.pollIntervalBackgroundMs == 2_000L &&
                 settings.lowPowerScan &&
-                settings.lowPowerConnection -> BALANCED
+                !settings.lowPowerConnection -> BALANCED
             settings.pollIntervalVisibleMs == 500L &&
                 settings.pollIntervalBackgroundMs == 1_000L &&
                 !settings.lowPowerScan &&

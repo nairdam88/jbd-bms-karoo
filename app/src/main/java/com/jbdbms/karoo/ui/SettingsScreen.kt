@@ -3,6 +3,8 @@ package com.jbdbms.karoo.ui
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -40,19 +42,25 @@ import com.jbdbms.karoo.data.BmsRepository
 import com.jbdbms.karoo.data.Direction
 import com.jbdbms.karoo.data.SettingsStore
 import com.jbdbms.karoo.protocol.JbdCodec
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * Friendly settings: three update presets for normal people, with the raw knobs
  * tucked away under Advanced. Protocol logging lives behind Developer options.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen(onClose: () -> Unit) {
     val settings by BmsRepository.settings.collectAsStateWithLifecycle()
     val consumers by BmsRepository.consumers.collectAsStateWithLifecycle()
     val rawFrames by BmsRepository.rawFrames.collectAsStateWithLifecycle()
+    val connectionLog by BmsRepository.connectionLog.collectAsStateWithLifecycle()
 
     var advancedExpanded by rememberSaveable { mutableStateOf(false) }
     var showLog by rememberSaveable { mutableStateOf(false) }
+    var showConnectionLog by rememberSaveable { mutableStateOf(false) }
     var versionTaps by remember { mutableIntStateOf(0) }
     var developerMode by rememberSaveable { mutableStateOf(false) }
 
@@ -86,7 +94,7 @@ fun SettingsScreen(onClose: () -> Unit) {
         HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp))
 
         GroupTitle("Updates")
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             PresetChip("Battery saver", BmsPreset.BATTERY_SAVER, preset) {
                 SettingsStore.update { BmsPreset.BATTERY_SAVER.applyTo(it) }
             }
@@ -133,6 +141,33 @@ fun SettingsScreen(onClose: () -> Unit) {
             }
             ToggleRow("Low-power Bluetooth connection", settings.lowPowerConnection) { value ->
                 SettingsStore.update { it.copy(lowPowerConnection = value) }
+            }
+            ToggleRow("Password-protected battery login", settings.authFallbackEnabled) { value ->
+                SettingsStore.update { it.copy(authFallbackEnabled = value) }
+            }
+            Text(
+                "Only turn on password login if your battery needs it; most do not.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+
+            TextButton(onClick = { showConnectionLog = !showConnectionLog }) {
+                Text(if (showConnectionLog) "Hide connection log" else "Show connection log")
+            }
+            if (showConnectionLog) {
+                Text(
+                    "Last ${connectionLog.takeLast(50).size} connection events.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                connectionLog.takeLast(50).forEach { entry ->
+                    Text(
+                        "${formatTime(entry.timestampMs)}  ${entry.message}",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp,
+                    )
+                }
+                TextButton(onClick = { BmsRepository.clearConnectionLog() }) {
+                    Text("Clear connection log")
+                }
             }
         }
 
@@ -257,3 +292,7 @@ private fun ChoiceRow(
 
 private fun formatMs(ms: Long): String =
     if (ms % 1000 == 0L) "${ms / 1000}s" else "${ms}ms"
+
+private val logTimeFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+
+private fun formatTime(epochMs: Long): String = logTimeFormat.format(Date(epochMs))

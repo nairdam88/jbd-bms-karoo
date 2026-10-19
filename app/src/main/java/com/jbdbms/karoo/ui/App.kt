@@ -246,6 +246,7 @@ private fun statusLine(
             data.socPercent?.let { append(" · $it%") }
         }
         ConnectionState.ERROR -> "Couldn't scan"
+        ConnectionState.CONNECT_FAILED -> "Couldn't connect to the battery"
     }
 }
 
@@ -357,6 +358,18 @@ private fun ScanContent(
                 }
             }
 
+            connection == ConnectionState.CONNECT_FAILED -> Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("Couldn't reach the battery", fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "It connected before but dropped. Make sure the battery is on and " +
+                            "close any other app using it, then tap Connect again.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+            }
+
             connection == ConnectionState.SCANNING && results.isEmpty() -> Row(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -394,7 +407,10 @@ private fun ScanContent(
                                 Text(signalLabel(result.rssi), style = MaterialTheme.typography.bodySmall)
                                 Text(result.address, style = MaterialTheme.typography.bodySmall)
                             }
-                            Button(onClick = { onConnect(result) }) { Text("Connect") }
+                            Button(
+                                onClick = { onConnect(result) },
+                                enabled = connection != ConnectionState.CONNECTING,
+                            ) { Text(if (connection == ConnectionState.CONNECTING) "…" else "Connect") }
                         }
                     }
                 }
@@ -407,6 +423,13 @@ private fun signalLabel(rssi: Int): String = when {
     rssi >= -60 -> "Strong signal"
     rssi >= -75 -> "Good signal"
     else -> "Weak signal"
+}
+
+private fun signalText(rssi: Int?): String = when {
+    rssi == null -> "–"
+    rssi >= -60 -> "Strong"
+    rssi >= -75 -> "Good"
+    else -> "Weak"
 }
 
 @Composable
@@ -456,6 +479,10 @@ private fun Dashboard(data: BmsData, onDisconnect: () -> Unit) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             Metric("Full capacity", data.fullCapacityAh?.let { "%.2f Ah".format(it) } ?: "–", Modifier.weight(1f))
             Metric("Cycles", data.cycleCount?.toString() ?: "–", Modifier.weight(1f))
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            Metric("Signal", signalText(data.rssi), Modifier.weight(1f))
+            Metric("Cells", if (data.cells.isEmpty()) "–" else data.cells.size.toString(), Modifier.weight(1f))
         }
 
         Spacer(Modifier.height(6.dp))

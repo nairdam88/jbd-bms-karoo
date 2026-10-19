@@ -29,6 +29,8 @@ data class BmsData(
     val swVersion: String? = null,
     val manufactureDate: String? = null,
     val deviceName: String? = null,
+    /** Last known received signal strength indicator in dBm, if any. */
+    val rssi: Int? = null,
     val lastUpdateEpochMs: Long = 0L,
 ) {
     val cellMinV: Double? get() = cells.minOrNull()

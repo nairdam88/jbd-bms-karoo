@@ -1,6 +1,7 @@
 package com.jbdbms.karoo.data
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -16,7 +17,8 @@ class BmsSettingsTest {
         assertTrue(s.disconnectWhenIdle)
         assertTrue(s.autoReconnect)
         assertTrue(s.lowPowerScan)
-        assertTrue(s.lowPowerConnection)
+        assertFalse(s.lowPowerConnection)
+        assertFalse(s.authFallbackEnabled)
         assertEquals(200, s.rawBufferSize)
     }
 

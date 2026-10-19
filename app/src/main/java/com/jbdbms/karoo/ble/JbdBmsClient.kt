@@ -33,6 +33,7 @@ import com.jbdbms.karoo.protocol.JbdFrameParser
 import com.jbdbms.karoo.data.ScanResult as DeviceScanResult
 import com.jbdbms.karoo.service.BmsForegroundService
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -46,11 +47,25 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
-enum class ConnectionState { DISCONNECTED, SCANNING, CONNECTING, CONNECTED, AUTHENTICATING, ERROR }
+enum class ConnectionState {
+    DISCONNECTED,
+    SCANNING,
+    CONNECTING,
+    CONNECTED,
+    AUTHENTICATING,
+
+    /** Scanning itself failed (adapter/stack error). */
+    ERROR,
+
+    /** Scanning worked, but reaching the battery did not. */
+    CONNECT_FAILED,
+}
 
 /**
  * Single-connection BLE central for JBD / XiaoXiang / Overkill Solar BMS modules.
@@ -96,11 +111,15 @@ class JbdBmsClient(private val context: Context) {
     private var authTimeoutJob: Job? = null
 
     // ---------------------------------------------------------------- state
+    private val connectMutex = Mutex()
     private var lastAddress: String? = DeviceStore.lastAddress.value
     private var manualDisconnect = false
     private var uiVisible = false
     private var uiCounted = false
     private var connectResult: CompletableDeferred<Boolean>? = null
+
+    @Volatile
+    private var scanning = false
 
     private val parser = JbdFrameParser()
     private val auth = JbdAuth { bytes, note -> sendRaw(bytes, note) }
@@ -123,6 +142,11 @@ class JbdBmsClient(private val context: Context) {
     /** Number of active data consumers (Karoo streams + visible UI). */
     val consumers: StateFlow<Int> = _consumers.asStateFlow()
 
+    private val connectionLogBuffer = ConnectionLogBuffer()
+    private val _connectionLog = MutableStateFlow<List<ConnectionLogEntry>>(emptyList())
+    /** Timestamped connection events for the in-app debug log. */
+    val connectionLog: StateFlow<List<ConnectionLogEntry>> = _connectionLog.asStateFlow()
+
     // ---------------------------------------------------------------- raw buffer
     private val rawLock = Any()
     @Volatile private var rawEnabled = false
@@ -132,6 +156,19 @@ class JbdBmsClient(private val context: Context) {
     init {
         scope.launch { _consumers.collect { onConsumersChanged() } }
         scope.launch { SettingsStore.settings.collect { onSettingsChanged() } }
+    }
+
+    // ----------------------------------------------------------------- debug log
+
+    private fun log(message: String) {
+        Log.i(TAG, message)
+        connectionLogBuffer.add(message)
+        _connectionLog.value = connectionLogBuffer.snapshot()
+    }
+
+    fun clearConnectionLog() {
+        connectionLogBuffer.clear()
+        _connectionLog.value = emptyList()
     }
 
     // ----------------------------------------------------------------- permissions
@@ -185,7 +222,8 @@ class JbdBmsClient(private val context: Context) {
         }
 
         override fun onScanFailed(errorCode: Int) {
-            Log.w(TAG, "scan failed: $errorCode")
+            scanning = false
+            log("Scan failed: error $errorCode")
             _connectionState.value = ConnectionState.ERROR
         }
     }
@@ -213,11 +251,21 @@ class JbdBmsClient(private val context: Context) {
         }
         val scanner = adapter?.bluetoothLeScanner
         if (scanner == null) {
+            log("Scan unavailable: no scanner")
             _connectionState.value = ConnectionState.ERROR
             return
         }
+        if (scanning) {
+            // A scan is already running; don't let a second start kill it.
+            return
+        }
+        // A pending auto-reconnect would call stopScan() and swallow this scan.
+        reconnectJob?.cancel()
+        reconnectJob = null
         _scanResults.value = emptyList()
+        scanning = true
         _connectionState.value = ConnectionState.SCANNING
+        log("Scan started")
         val s = SettingsStore.settings.value
         val scanSettings = ScanSettings.Builder()
             .setScanMode(
@@ -242,10 +290,13 @@ class JbdBmsClient(private val context: Context) {
     fun stopScan() {
         scanTimeoutJob?.cancel()
         scanTimeoutJob = null
+        val wasScanning = scanning
+        scanning = false
         try {
             adapter?.bluetoothLeScanner?.stopScan(scanCallback)
         } catch (_: SecurityException) {
         }
+        if (wasScanning) log("Scan stopped")
         if (_connectionState.value == ConnectionState.SCANNING) {
             _connectionState.value = ConnectionState.DISCONNECTED
         }
@@ -261,9 +312,11 @@ class JbdBmsClient(private val context: Context) {
         reconnectJob = null
         connectJob?.cancel()
         connectJob = scope.launch {
-            if (!attemptConnect(address)) {
+            log("User asked to connect to $address")
+            if (!attemptConnect(address, autoConnect = false)) {
                 val ready = hasRequiredPermissions() && isBluetoothOn()
-                _connectionState.value = if (ready) ConnectionState.ERROR else ConnectionState.DISCONNECTED
+                _connectionState.value =
+                    if (ready) ConnectionState.CONNECT_FAILED else ConnectionState.DISCONNECTED
             }
         }
     }
@@ -277,53 +330,83 @@ class JbdBmsClient(private val context: Context) {
 
     /** Clears a stale "needs attention" state after the user fixes permissions or Bluetooth. */
     fun clearError() {
-        if (gatt == null && _connectionState.value == ConnectionState.ERROR) {
+        val stuck = _connectionState.value == ConnectionState.ERROR ||
+            _connectionState.value == ConnectionState.CONNECT_FAILED
+        if (gatt == null && stuck) {
             _connectionState.value = ConnectionState.DISCONNECTED
         }
     }
 
+    /**
+     * Opens a GATT link and waits for the service/characteristic setup to
+     * finish. Attempts are serialised so two `connectGatt()` calls can never
+     * race, and the link is always closed on any non-success exit — including
+     * coroutine cancellation, which previously leaked the connection and left
+     * the BLE stack unable to connect again.
+     */
     @SuppressLint("MissingPermission")
-    private suspend fun attemptConnect(address: String): Boolean {
-        if (!hasRequiredPermissions()) return false
-        stopScan()
-        val device: BluetoothDevice = try {
-            adapter?.getRemoteDevice(address)
-        } catch (_: IllegalArgumentException) {
-            null
-        } ?: return false
+    private suspend fun attemptConnect(address: String, autoConnect: Boolean): Boolean =
+        connectMutex.withLock {
+            if (!hasRequiredPermissions()) {
+                log("Connect skipped: missing permission")
+                return false
+            }
+            if (!isBluetoothOn()) {
+                log("Connect skipped: Bluetooth off")
+                return false
+            }
+            if (gatt != null && _connectionState.value == ConnectionState.CONNECTED) {
+                log("Already connected; ignoring connect attempt")
+                return true
+            }
+            stopScan()
+            val device: BluetoothDevice = try {
+                adapter?.getRemoteDevice(address)
+            } catch (_: IllegalArgumentException) {
+                null
+            } ?: return false
 
-        val deferred = CompletableDeferred<Boolean>()
-        connectResult = deferred
-        closeGatt()
-        parser.reset()
-        authTried.set(false)
-        gotResponse.set(false)
-        _connectionState.value = ConnectionState.CONNECTING
-
-        val started = try {
-            gatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
-            gatt != null
-        } catch (_: SecurityException) {
-            false
-        }
-        if (!started) {
-            if (connectResult === deferred) connectResult = null
-            return false
-        }
-
-        return try {
-            withTimeout(SettingsStore.settings.value.connectTimeoutMs) { deferred.await() }
-        } catch (_: TimeoutCancellationException) {
+            val deferred = CompletableDeferred<Boolean>()
+            connectResult = deferred
             closeGatt()
-            _connectionState.value = ConnectionState.DISCONNECTED
-            false
-        } finally {
-            if (connectResult === deferred) connectResult = null
+            parser.reset()
+            authTried.set(false)
+            gotResponse.set(false)
+            _connectionState.value = ConnectionState.CONNECTING
+            log("Connecting to $address (autoConnect=$autoConnect)")
+
+            var success = false
+            try {
+                val newGatt = try {
+                    device.connectGatt(context, autoConnect, gattCallback, BluetoothDevice.TRANSPORT_LE)
+                } catch (_: SecurityException) {
+                    null
+                }
+                if (newGatt == null) {
+                    log("connectGatt returned no handle")
+                } else {
+                    gatt = newGatt
+                    success = withTimeout(SettingsStore.settings.value.connectTimeoutMs) {
+                        deferred.await()
+                    }
+                    if (!success) log("Connect attempt failed before services were ready")
+                }
+                success
+            } catch (_: TimeoutCancellationException) {
+                log("Connect timed out after ${SettingsStore.settings.value.connectTimeoutMs} ms")
+                false
+            } catch (e: CancellationException) {
+                log("Connect cancelled; releasing link")
+                throw e
+            } finally {
+                if (connectResult === deferred) connectResult = null
+                if (!success) closeGatt()
+            }
         }
-    }
 
     /** User-initiated disconnect. Suppresses auto-reconnect until the next [connect]. */
     fun disconnect() {
+        log("User disconnected")
         manualDisconnect = true
         reconnectJob?.cancel()
         reconnectJob = null
@@ -360,13 +443,21 @@ class JbdBmsClient(private val context: Context) {
     private val gattCallback = object : BluetoothGattCallback() {
         @SuppressLint("MissingPermission")
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
-            if (g !== gatt) return
+            if (g !== gatt) {
+                log("Ignoring stale link event (status=$status state=$newState)")
+                return
+            }
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                onLinkLost(g, "GATT error status=$status (state=$newState)")
+                return
+            }
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
+                    log("Link up; discovering services")
                     _connectionState.value = ConnectionState.CONNECTING
                     g.discoverServices()
                 }
-                BluetoothProfile.STATE_DISCONNECTED -> onLinkLost(g)
+                BluetoothProfile.STATE_DISCONNECTED -> onLinkLost(g, "link disconnected")
             }
         }
 
@@ -374,14 +465,15 @@ class JbdBmsClient(private val context: Context) {
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
             if (g !== gatt) return
             if (status != BluetoothGatt.GATT_SUCCESS) {
-                _connectionState.value = ConnectionState.ERROR
+                log("Service discovery failed: status=$status")
+                _connectionState.value = ConnectionState.CONNECT_FAILED
                 connectResult?.complete(false)
                 return
             }
             val service = g.getService(SERVICE_UUID)
             if (service == null) {
-                Log.w(TAG, "service FF00 not found")
-                _connectionState.value = ConnectionState.ERROR
+                log("Service FF00 not found")
+                _connectionState.value = ConnectionState.CONNECT_FAILED
                 connectResult?.complete(false)
                 return
             }
@@ -394,8 +486,8 @@ class JbdBmsClient(private val context: Context) {
                 ?: chars.firstOrNull { it.uuid == NOTIFY_UUID }
 
             if (notifyChar == null || writeChar == null) {
-                Log.w(TAG, "required characteristics not found")
-                _connectionState.value = ConnectionState.ERROR
+                log("Required characteristics not found")
+                _connectionState.value = ConnectionState.CONNECT_FAILED
                 connectResult?.complete(false)
                 return
             }
@@ -406,7 +498,9 @@ class JbdBmsClient(private val context: Context) {
             _connectionState.value = ConnectionState.CONNECTED
             lastAddress = g.device.address
             DeviceStore.set(g.device.address)
+            log("Connected to ${g.device.address}; notifications subscribed")
             applyConnectionPriority()
+            readRssi()
             sendRead(JbdCodec.REG_DEVICE_NAME, "read device name")
             connectResult?.complete(true)
             onConsumersChanged()
@@ -429,6 +523,22 @@ class JbdBmsClient(private val context: Context) {
             if (g !== gatt) return
             onNotify(characteristic.value ?: return)
         }
+
+        override fun onReadRemoteRssi(g: BluetoothGatt, rssi: Int, status: Int) {
+            if (g !== gatt) return
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                _data.value = _data.value.copy(rssi = rssi)
+            }
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun readRssi() {
+        val g = gatt ?: return
+        try {
+            g.readRemoteRssi()
+        } catch (_: SecurityException) {
+        }
     }
 
     private fun BluetoothGattCharacteristic.hasProperty(property: Int): Boolean =
@@ -439,8 +549,9 @@ class JbdBmsClient(private val context: Context) {
             hasProperty(BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE)
 
     /** Called whenever the current GATT link drops, for any reason. */
-    private fun onLinkLost(g: BluetoothGatt) {
+    private fun onLinkLost(g: BluetoothGatt, reason: String) {
         if (g !== gatt) return
+        log("Link lost: $reason")
         stopPolling()
         graceJob?.cancel()
         graceJob = null
@@ -464,7 +575,8 @@ class JbdBmsClient(private val context: Context) {
             idleDisconnectJob?.cancel()
             idleDisconnectJob = null
             if (gatt == null) {
-                if (lastAddress != null && !manualDisconnect) startReconnect()
+                val connecting = connectJob?.isActive == true
+                if (lastAddress != null && !manualDisconnect && !connecting) startReconnect()
             } else {
                 startPolling()
             }
@@ -481,6 +593,7 @@ class JbdBmsClient(private val context: Context) {
 
     private fun startPolling() {
         if (pollJob?.isActive == true) return
+        log("Polling started")
         pollJob = scope.launch {
             var basicInfo = true
             while (isActive) {
@@ -489,6 +602,7 @@ class JbdBmsClient(private val context: Context) {
                 } else {
                     sendRead(JbdCodec.REG_CELL_VOLTAGES, "read cell voltages")
                 }
+                readRssi()
                 basicInfo = !basicInfo
                 delay(currentPollInterval())
             }
@@ -510,6 +624,7 @@ class JbdBmsClient(private val context: Context) {
         idleDisconnectJob = scope.launch {
             delay(SettingsStore.settings.value.idleDisconnectMs)
             if (_consumers.value == 0) {
+                log("Idle disconnect")
                 stopPolling()
                 try {
                     gatt?.disconnect()
@@ -531,18 +646,27 @@ class JbdBmsClient(private val context: Context) {
         if (!s.autoReconnect) return
         if (!hasRequiredPermissions() || !isBluetoothOn()) return
         if (reconnectJob?.isActive == true) return
+        if (connectJob?.isActive == true) return
         reconnectJob = scope.launch {
+            log("Auto-reconnect started")
             var attempt = 0
             var backoff = s.reconnectBaseDelayMs
+            // Let the BLE stack release the old link before dialling again.
+            delay((s.reconnectBaseDelayMs / 4).coerceIn(300L, 1_000L))
             while (isActive && _consumers.value > 0 && gatt == null && attempt < s.reconnectMaxRetries) {
                 if (!hasRequiredPermissions() || !isBluetoothOn()) return@launch
                 if (attempt > 0) delay(backoff)
                 backoff = (backoff * 2).coerceAtMost(s.reconnectMaxDelayMs)
                 attempt++
-                if (attemptConnect(address)) return@launch
+                log("Reconnect attempt $attempt")
+                if (attemptConnect(address, autoConnect = true)) {
+                    log("Reconnected after $attempt attempt(s)")
+                    return@launch
+                }
             }
             if (_consumers.value > 0 && gatt == null) {
-                _connectionState.value = ConnectionState.ERROR
+                log("Auto-reconnect gave up after $attempt attempt(s)")
+                _connectionState.value = ConnectionState.CONNECT_FAILED
             }
         }
     }
@@ -590,6 +714,9 @@ class JbdBmsClient(private val context: Context) {
         }
 
         val result = parser.feed(value)
+        if (result.frames.isNotEmpty() && !gotResponse.get()) {
+            log("Battery replied to a read request")
+        }
         for (frame in result.frames) {
             gotResponse.set(true)
             if (_connectionState.value == ConnectionState.AUTHENTICATING) {
@@ -672,6 +799,7 @@ class JbdBmsClient(private val context: Context) {
     // ----------------------------------------------------------------- auth fallback
 
     private fun scheduleAuthFallback() {
+        if (!SettingsStore.settings.value.authFallbackEnabled) return
         authTimeoutJob?.cancel()
         authTimeoutJob = scope.launch {
             delay(3500)
@@ -679,6 +807,7 @@ class JbdBmsClient(private val context: Context) {
                 authTried.set(true)
                 _connectionState.value = ConnectionState.AUTHENTICATING
                 val mac = gatt?.device?.address ?: ""
+                log("No 0xDD response; trying FF/AA password handshake")
                 auth.start(mac)
                 addRaw(Direction.TX, ByteArray(0), "no response to 0xDD read; attempting FF/AA auth")
             }
