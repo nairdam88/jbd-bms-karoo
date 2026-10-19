@@ -14,6 +14,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.jbdbms.karoo.MainActivity
 import com.jbdbms.karoo.R
+import com.jbdbms.karoo.data.BmsRepository
 
 /**
  * Keeps the process (and therefore the BMS connection) alive while the app is
@@ -53,6 +54,20 @@ class BmsForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        // Swiping the app away should not leave a half-open BLE link behind.
+        if (BmsRepository.isInitialized()) {
+            BmsRepository.releaseLink()
+            if (BmsRepository.consumers.value == 0) stopSelf()
+        }
+        super.onTaskRemoved(rootIntent)
+    }
+
+    override fun onDestroy() {
+        if (BmsRepository.isInitialized()) BmsRepository.releaseLink()
+        super.onDestroy()
+    }
 
     private fun createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

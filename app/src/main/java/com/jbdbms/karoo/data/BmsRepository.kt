@@ -23,7 +23,13 @@ object BmsRepository {
         }
     }
 
+    fun isInitialized(): Boolean = instance != null
+
     fun client(): JbdBmsClient = requireNotNull(instance) { "BmsRepository.init() not called" }
+
+    fun releaseLink() {
+        instance?.releaseLink()
+    }
 
     val connectionState: StateFlow<ConnectionState> get() = client().connectionState
     val data: StateFlow<BmsData> get() = client().data
